@@ -1,22 +1,26 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sys
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
-from subprocess import CalledProcessError
-from typing import TYPE_CHECKING
+from subprocess import CalledProcessError, Popen
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
 from virtualenv.app_data import AppDataDiskFolder
 from virtualenv.seed.wheels.acquire import download_wheel, get_wheel, pip_wheel_env_run
-from virtualenv.seed.wheels.embed import BUNDLE_FOLDER, get_embed_wheel
+from virtualenv.seed.wheels.embed import get_embed_wheel
 from virtualenv.seed.wheels.periodic_update import UnverifiedWheelError, dump_datetime
-from virtualenv.seed.wheels.util import Wheel, discover_wheels
+from virtualenv.seed.wheels.util import Wheel
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from ssl import SSLContext
     from unittest.mock import MagicMock
 
     from pytest_mock import MockerFixture
@@ -33,124 +37,226 @@ def test_pip_wheel_env_run_could_not_find(session_app_data, mocker) -> None:
         pip_wheel_env_run([], session_app_data, os.environ)
 
 
-def test_download_wheel_bad_output(mocker, for_py_version, session_app_data) -> None:
-    """if the download contains no match for what wheel was downloaded, pick one that matches from target"""
-    distribution = "setuptools"
-    p_open = mocker.MagicMock()
-    mocker.patch("virtualenv.seed.wheels.acquire.Popen", return_value=p_open)
-    mocker.patch("virtualenv.seed.wheels.acquire.verify_wheel_digest")
-    p_open.communicate.return_value = "", ""
-    p_open.returncode = 0
+@pytest.mark.parametrize(
+    "version_spec",
+    [
+        pytest.param(lambda _wheel: None, id="latest"),
+        pytest.param(lambda _wheel: "", id="unpinned"),
+        pytest.param(lambda wheel: f"=={wheel.version}", id="pinned"),
+    ],
+)
+def test_download_wheel_uses_staged_archive(
+    download_process: tuple[MagicMock, Wheel, bytearray],
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+    version_spec: Callable[[Wheel], str | None],
+) -> None:
+    _, expected, _ = download_process
+    result: Final = download_wheel("pip", version_spec(expected), for_py_version, [], session_app_data, tmp_path, {})
+    assert (result.path, result.path.read_bytes(), list(tmp_path.iterdir())) == (
+        tmp_path / expected.name,
+        expected.path.read_bytes(),
+        [tmp_path / expected.name],
+    )
 
-    embed = get_embed_wheel(distribution, for_py_version)
-    as_path = mocker.MagicMock()
-    available = discover_wheels(BUNDLE_FOLDER, "setuptools", None, for_py_version)
-    as_path.iterdir.return_value = [i.path for i in available]
 
-    result = download_wheel(
-        distribution,
-        f"=={embed.version}",
+def test_download_wheel_ignores_path_reported_by_pip(
+    download_process: tuple[MagicMock, Wheel, bytearray],
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+) -> None:
+    process, expected, _ = download_process
+    elsewhere: Final = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / expected.name).write_bytes(b"not the archive pip staged")
+    house: Final = tmp_path / "house"
+    house.mkdir()
+    process.return_value.configure_mock(**{"communicate.return_value": (f"Saved {elsewhere / expected.name}", "")})
+    result: Final = download_wheel("pip", None, for_py_version, [], session_app_data, house, {})
+    assert (result.path, result.path.read_bytes(), list(house.iterdir())) == (
+        house / expected.name,
+        expected.path.read_bytes(),
+        [house / expected.name],
+    )
+
+
+def test_download_wheel_not_found_raises(
+    download_process: tuple[MagicMock, Wheel, bytearray],
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+) -> None:
+    download_process[0].side_effect = None
+    with pytest.raises(RuntimeError, match="could not find downloaded wheel"):
+        download_wheel("pip", None, for_py_version, [], session_app_data, tmp_path, {})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_wheel_rejects_extra_staged_archive(
+    download_process: tuple[MagicMock, Wheel, bytearray],
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+) -> None:
+    process, _, _ = download_process
+    stage_expected: Final = process.side_effect
+
+    def downloaded(cmd: list[str], **kwargs: str | int | bool | dict[str, str]) -> Popen[str]:
+        (Path(cmd[cmd.index("-d") + 1]) / "pip-0.0.0-1-py3-none-any.whl").write_bytes(b"decoy")
+        return stage_expected(cmd, **kwargs)
+
+    process.side_effect = downloaded
+    with pytest.raises(RuntimeError, match="expected one archive"):
+        download_wheel("pip", None, for_py_version, [], session_app_data, tmp_path, {})
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.usefixtures("download_process")
+def test_download_wheel_rejects_wrong_version(
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="unexpected downloaded wheel"):
+        download_wheel("pip", "==0.0.0", for_py_version, [], session_app_data, tmp_path, {})
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.usefixtures("download_process")
+def test_download_wheel_rejects_wrong_distribution(
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="unexpected downloaded wheel"):
+        download_wheel("setuptools", None, for_py_version, [], session_app_data, tmp_path, {})
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.usefixtures("download_process")
+def test_download_wheel_rejects_unsupported_python(
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="does not support Python"):
+        download_wheel("pip", None, "2.7", [], session_app_data, tmp_path, {})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_fails(
+    download_process: tuple[MagicMock, Wheel, bytearray],
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+) -> None:
+    download_process[0].return_value.configure_mock(returncode=7)
+    with pytest.raises(CalledProcessError) as context:
+        download_wheel("pip", None, for_py_version, [], session_app_data, tmp_path, {})
+    error: Final = context.value
+    assert (
+        error.output,
+        error.stderr,
+        error.returncode,
+        error.cmd[:3],
+        error.cmd[-1],
+        Path(error.cmd[error.cmd.index("-d") + 1]).parent,
+        list(tmp_path.iterdir()),
+    ) == (
+        "progress complete",
+        "",
+        7,
+        [sys.executable, "-m", "pip"],
+        "pip",
+        tmp_path,
+        [],
+    )
+
+
+def test_download_wheel_python_io_encoding(
+    download_process: tuple[MagicMock, Wheel, bytearray],
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+) -> None:
+    download_wheel("pip", None, for_py_version, [], session_app_data, tmp_path, {})
+    assert download_process[0].call_args.kwargs["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_download_wheel_keeps_failed_verification_out_of_cache(
+    download_process: tuple[MagicMock, Wheel, bytearray],
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+) -> None:
+    download_process[2].extend(b"\n")
+    with pytest.raises(RuntimeError, match="but PyPI reports"):
+        download_wheel("pip", None, for_py_version, [], session_app_data, tmp_path, {})
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "env_var",
+    [
+        pytest.param(name, id=name.lower())
+        for name in (
+            "PIP_INDEX_URL",
+            "PIP_EXTRA_INDEX_URL",
+            "PIP_INDEX",
+        )
+    ],
+)
+def test_download_wheel_preserves_custom_index_policy(
+    download_process: tuple[MagicMock, Wheel, bytearray],
+    for_py_version: str,
+    session_app_data: AppDataDiskFolder,
+    tmp_path: Path,
+    env_var: str,
+) -> None:
+    download_process[2].extend(b"\n")
+    result: Final = download_wheel(
+        "pip",
+        None,
         for_py_version,
         [],
         session_app_data,
-        as_path,
-        os.environ,
+        tmp_path,
+        {env_var: "https://index.example/simple"},
     )
-    assert result.path == embed.path
+    assert result.path.read_bytes() == bytes(download_process[2])
 
 
-def test_download_wheel_not_found_raises(mocker, for_py_version, session_app_data) -> None:
-    """download_wheel must raise a clear error rather than crash when no wheel can be identified at all."""
-    p_open = mocker.MagicMock()
-    mocker.patch("virtualenv.seed.wheels.acquire.Popen", return_value=p_open)
-    p_open.communicate.return_value = "", ""
-    p_open.returncode = 0
-    as_path = mocker.MagicMock()
-    as_path.iterdir.return_value = []
+@pytest.fixture
+def download_process(mocker: MockerFixture, for_py_version: str) -> tuple[MagicMock, Wheel, bytearray]:
+    wheel: Final = get_embed_wheel("pip", for_py_version)
+    payload: Final = bytearray(wheel.path.read_bytes())
+    # PyPy can retain the hash input buffer until garbage collection.
+    metadata: Final = json.dumps({
+        "releases": {
+            wheel.version: [
+                {
+                    "filename": wheel.name,
+                    "digests": {"sha256": hashlib.sha256(bytes(payload)).hexdigest()},
+                }
+            ]
+        }
+    }).encode()
 
-    with pytest.raises(RuntimeError, match="could not find downloaded wheel"):
-        download_wheel("setuptools", None, for_py_version, [], session_app_data, as_path, os.environ)
+    def metadata_response(*_args: str, **_kwargs: SSLContext | None) -> BytesIO:
+        return BytesIO(metadata)
 
+    # isolate the PyPI metadata cache so the mocked response neither reads nor leaks a real lookup in this process
+    mocker.patch.dict("virtualenv.seed.wheels.periodic_update._PYPI_CACHE", clear=True)
+    mocker.patch("virtualenv.seed.wheels.periodic_update.urlopen", autospec=True, side_effect=metadata_response)
 
-def test_download_fails(mocker, for_py_version, session_app_data) -> None:
-    p_open = mocker.MagicMock()
-    mocker.patch("virtualenv.seed.wheels.acquire.Popen", return_value=p_open)
-    p_open.communicate.return_value = "out", "err"
-    p_open.returncode = 1
+    def downloaded(cmd: list[str], **_kwargs: str | int | bool | dict[str, str]) -> Popen[str]:
+        (Path(cmd[cmd.index("-d") + 1]) / wheel.name).write_bytes(payload)
+        return process.return_value
 
-    as_path = mocker.MagicMock()
-    with pytest.raises(CalledProcessError) as context:
-        download_wheel("pip", "==1", for_py_version, [], session_app_data, as_path, os.environ)
-    exc = context.value
-    assert exc.output == "out"
-    assert exc.stderr == "err"
-    assert exc.returncode == 1
-    assert [
-        sys.executable,
-        "-m",
-        "pip",
-        "download",
-        "--progress-bar",
-        "off",
-        "--disable-pip-version-check",
-        "--only-binary=:all:",
-        "--no-deps",
-        "--python-version",
-        for_py_version,
-        "-d",
-        str(as_path),
-        "pip==1",
-    ] == exc.cmd
-
-
-def test_download_wheel_python_io_encoding(mocker, for_py_version, session_app_data) -> None:
-    mock_popen = mocker.patch("virtualenv.seed.wheels.acquire.Popen")
-    mock_popen.return_value.communicate.return_value = "Saved a-b-c.whl", ""
-    mock_popen.return_value.returncode = 0
-    mocker.patch("pathlib.Path.absolute", return_value=Path("a-b-c.whl"))
-    mocker.patch("virtualenv.seed.wheels.acquire.verify_wheel_digest")
-
-    download_wheel("pip", "==1", for_py_version, [], session_app_data, "folder", os.environ.copy())
-
-    env = mock_popen.call_args[1]["env"]
-    assert env["PYTHONIOENCODING"] == "utf-8"
-
-
-def test_download_wheel_verifies_digest(mocker, for_py_version, session_app_data) -> None:
-    """download_wheel must reject a wheel whose bytes do not match PyPI's published digest."""
-    mock_popen = mocker.patch("virtualenv.seed.wheels.acquire.Popen")
-    mock_popen.return_value.communicate.return_value = "Saved a-b-c.whl", ""
-    mock_popen.return_value.returncode = 0
-    mocker.patch("pathlib.Path.absolute", return_value=Path("a-b-c.whl"))
-    verify = mocker.patch(
-        "virtualenv.seed.wheels.acquire.verify_wheel_digest",
-        side_effect=RuntimeError("digest mismatch"),
-    )
-
-    with pytest.raises(RuntimeError, match="digest mismatch"):
-        download_wheel("pip", "==1", for_py_version, [], session_app_data, "folder", os.environ.copy())
-
-    assert verify.call_count == 1
-
-
-@pytest.mark.parametrize("env_var", ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_INDEX"])
-def test_download_wheel_skips_digest_check_for_custom_index(mocker, for_py_version, session_app_data, env_var) -> None:
-    """A configured custom index may legitimately serve a same-named wheel PyPI never built."""
-    mock_popen = mocker.patch("virtualenv.seed.wheels.acquire.Popen")
-    mock_popen.return_value.communicate.return_value = "Saved a-b-c.whl", ""
-    mock_popen.return_value.returncode = 0
-    mocker.patch("pathlib.Path.absolute", return_value=Path("a-b-c.whl"))
-    verify = mocker.patch(
-        "virtualenv.seed.wheels.acquire.verify_wheel_digest",
-        side_effect=RuntimeError("would have rejected a legitimate wheel"),
-    )
-    env = os.environ.copy()
-    env[env_var] = "https://example.com/simple"
-
-    result = download_wheel("pip", "==1", for_py_version, [], session_app_data, "folder", env)
-
-    assert result.name == "a-b-c.whl"
-    assert verify.call_count == 0
+    process: Final = mocker.patch("virtualenv.seed.wheels.acquire.Popen", autospec=True, side_effect=downloaded)
+    process.return_value.configure_mock(**{"communicate.return_value": ("progress complete", ""), "returncode": 0})
+    return process, wheel, payload
 
 
 @pytest.fixture

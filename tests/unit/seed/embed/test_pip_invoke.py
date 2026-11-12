@@ -1,77 +1,128 @@
 from __future__ import annotations
 
-import itertools
+import subprocess
 import sys
-from shutil import copy2
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
 from virtualenv.run import cli_run
 from virtualenv.seed.embed.pip_invoke import PipInvoke
-from virtualenv.seed.wheels.bundle import load_embed_wheel
-from virtualenv.seed.wheels.embed import BUNDLE_FOLDER, BUNDLE_SUPPORT
+from virtualenv.seed.wheels.embed import get_embed_wheel
+
+if TYPE_CHECKING:
+    from subprocess import Popen
+
+    from pytest_mock import MockerFixture
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize("no", ["pip", "setuptools", ""], ids=["no-pip", "no-setuptools", "all"])
-def test_base_bootstrap_via_pip_invoke(tmp_path, coverage_env, mocker, current_fastest, no) -> None:
-    extra_search_dir = tmp_path / "extra"
-    extra_search_dir.mkdir()
-    for_py_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-    new = BUNDLE_SUPPORT[for_py_version]
-    for wheel_filename in BUNDLE_SUPPORT[for_py_version].values():
-        copy2(str(BUNDLE_FOLDER / wheel_filename), str(extra_search_dir))
-
-    def _load_embed_wheel(app_data, distribution, _for_py_version, version):
-        return load_embed_wheel(app_data, distribution, old_ver, version)
-
-    old_ver = "3.9"
-    old = BUNDLE_SUPPORT[old_ver]
-    mocker.patch("virtualenv.seed.wheels.bundle.load_embed_wheel", side_effect=_load_embed_wheel)
-
-    def _execute(cmd, env):
-        expected = set()
-        for distribution, with_version in versions.items():
-            if distribution == no:
-                continue
-            if with_version == "embed" or old[distribution] == new[distribution]:
-                expected.add(BUNDLE_FOLDER)
-            else:
-                expected.add(extra_search_dir)
-        expected_list = list(
-            itertools.chain.from_iterable(["--find-links", str(e)] for e in sorted(expected, key=str)),
-        )
-        found = cmd[-len(expected_list) :] if expected_list else []
-        assert "--no-index" not in cmd
-        cmd.append("--no-index")
-        assert found == expected_list
-        return original(cmd, env)
-
-    original = PipInvoke._execute  # ruff:ignore[private-member-access]
-    run = mocker.patch.object(PipInvoke, "_execute", side_effect=_execute)
-    versions = {"pip": "embed", "setuptools": "bundle"}
-
-    create_cmd = [
+@pytest.mark.parametrize(
+    "excluded",
+    [pytest.param("pip", id="no-pip"), pytest.param("setuptools", id="no-setuptools"), pytest.param("", id="all")],
+)
+def test_base_bootstrap_via_pip_invoke(tmp_path: Path, current_fastest: str, excluded: str) -> None:
+    command: Final = [
         "--seeder",
         "pip",
         str(tmp_path / "env"),
         "--download",
         "--creator",
         current_fastest,
-        "--extra-search-dir",
-        str(extra_search_dir),
-        "--app-data",
-        str(tmp_path / "app-data"),
+        "--pip",
+        "embed",
+        "--setuptools",
+        "embed",
+        "--no-periodic-update",
     ]
-    for dist, version in versions.items():
-        create_cmd.extend([f"--{dist}", version])
-    if no:
-        create_cmd.append(f"--no-{no}")
-    result = cli_run(create_cmd)
-    coverage_env()
+    if excluded:
+        command.append(f"--no-{excluded}")
+    session: Final = cli_run(command)
+    assert {path.name for path in session.creator.purelib.iterdir()} & {"pip", "setuptools"} == {
+        "pip",
+        "setuptools",
+    } - {excluded}
 
-    assert result
-    assert run.call_count == 1
 
-    installed = {path.name for path in result.creator.purelib.iterdir()}
-    assert installed & {"pip", "setuptools"} == {"pip", "setuptools"} - {no}
+def test_pip_invoke_offers_only_selected_wheels(tmp_path: Path, mocker: MockerFixture, for_py_version: str) -> None:
+    seen: Final[list[tuple[list[str], set[str]]]] = []
+    original: Final = PipInvoke._execute  # ruff:ignore[private-member-access]
+
+    def _execute(cmd: list[str], env: dict[str, str]) -> Popen[bytes]:
+        links: Final = [cmd[index + 1] for index, arg in enumerate(cmd) if arg == "--find-links"]
+        seen.append((list(cmd), {entry.name for link in links for entry in Path(link).iterdir()}))
+        return original(cmd, env)
+
+    mocker.patch.object(PipInvoke, "_execute", side_effect=_execute)
+    cli_run([
+        str(tmp_path / "env"),
+        "--seeder",
+        "pip",
+        "--download",
+        "--pip",
+        "embed",
+        "--setuptools",
+        "embed",
+        "--no-periodic-update",
+    ])
+    ((cmd, offered),) = seen
+    # pip must not reach an index on its own, nor see other archives that share a folder with the selected wheels
+    assert ("--no-index" in cmd, cmd.count("--find-links"), offered) == (
+        True,
+        1,
+        {get_embed_wheel(distribution, for_py_version).name for distribution in ("pip", "setuptools")},
+    )
+
+
+def test_pip_invoke_download_goes_through_verified_path(tmp_path: Path, mocker: MockerFixture) -> None:
+    download: Final = mocker.patch(
+        "virtualenv.seed.wheels.acquire.download_wheel",
+        side_effect=RuntimeError("digest mismatch"),
+    )
+    with pytest.raises(RuntimeError, match="digest mismatch"):
+        cli_run([
+            str(tmp_path / "env"),
+            "--seeder",
+            "pip",
+            "--download",
+            "--pip",
+            "0.0.0",
+            "--no-setuptools",
+            "--no-periodic-update",
+        ])
+    assert download.call_count == 1
+
+
+def test_pip_invoke_reports_unavailable_wheel(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="could not get wheel for distribution pip"):
+        cli_run([
+            str(tmp_path / "env"),
+            "--seeder",
+            "pip",
+            "--pip",
+            "0.0.0",
+            "--no-download",
+            "--no-periodic-update",
+        ])
+
+
+@pytest.mark.usefixtures("_no_coverage")
+def test_pip_invoke_freeze_uses_version_pin(tmp_path: Path) -> None:
+    session: Final = cli_run([
+        str(tmp_path / "env"),
+        "--seeder",
+        "pip",
+        "--pip",
+        "embed",
+        "--no-setuptools",
+        "--no-periodic-update",
+    ])
+    result: Final = subprocess.run(
+        [str(session.creator.exe), "-I", "-m", "pip", "freeze", "--all"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    version: Final = get_embed_wheel("pip", f"{sys.version_info.major}.{sys.version_info.minor}").version
+    assert f"pip=={version}" in result.stdout.splitlines()
