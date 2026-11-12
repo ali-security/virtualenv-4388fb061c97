@@ -1,0 +1,4 @@
+Stop bash running commands from ``--prompt`` or an environment name containing ``$(...)``, backticks or a backslash
+after ``shopt -s promptvars``, ``set -o posix``, or in a child shell that inherits an exported ``PS1``
+(GHSA-cx6f-vjhg-g3cc); reported by :user:`rozzkml`. zsh now draws the prompt from ``psvar[9]``, which is never parsed as
+shell syntax.

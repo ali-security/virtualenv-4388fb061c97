@@ -64,6 +64,11 @@ deactivate () {
         unset _OLD_VIRTUAL_PS1
     fi
 
+    if [ -n "${_OLD_VIRTUAL_PSVAR+x}" ] ; then
+        psvar[9]="$_OLD_VIRTUAL_PSVAR"
+        unset _OLD_VIRTUAL_PSVAR
+    fi
+
     unset VIRTUAL_ENV
     unset VIRTUAL_ENV_PROMPT
     if [ ! "${1-}" = "nondestructive" ] ; then
@@ -125,26 +130,38 @@ if [ __TK_LIBRARY__ != "" ]; then
     export TK_LIBRARY
 fi
 
-if [ -z "${VIRTUAL_ENV_DISABLE_PROMPT-}" ] ; then
+if [ -z "${VIRTUAL_ENV_DISABLE_PROMPT-}" ] &&
+    { [ -n "${BASH_VERSION-}" ] || [ -n "${ZSH_VERSION-}" ]; }; then
     _OLD_VIRTUAL_PS1="${PS1-}"
-    _VIRTUAL_PROMPT="${VIRTUAL_ENV_PROMPT}"
-    # bash, and zsh under PROMPT_SUBST, re-expand backslashes, dollar signs and backticks in PS1 on every redraw;
-    # zsh gets the escaping even without the option, since a user can set it after activation. The guards keep
-    # the substitution away from POSIX shells such as dash, which reject it with "Bad substitution"
     if [ -n "${BASH_VERSION-}" ]; then
-        # bash first decodes its backslash prompt escapes, turning \\ into \ and \$ into $ (or # for root), and only
-        # then expands the result, so each character needs escaping for both passes
-        _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\\/\\\\\\\\}"
-        _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\$/\\\\\$}"
-        _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\`/\\\\\`}"
-    elif [ -n "${ZSH_VERSION-}" ]; then
-        _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\\/\\\\}"
-        _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\$/\\\$}"
-        _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\`/\\\`}"
-    fi
-    # zsh expands % sequences in PS1 as prompt escapes
-    if [ -n "${ZSH_VERSION-}" ]; then
-        _VIRTUAL_PROMPT="${_VIRTUAL_PROMPT//\%/%%}"
+        # bash decodes its prompt escapes on every draw and expands the result when promptvars is on or in posix
+        # mode; both can change after activation and an exported PS1 reaches child shells, so the value gets escaped
+        # for both passes whatever the state is now. The escapes are built by concatenation because the replacement
+        # in ${var//pat/rep} loses backslashes depending on the bash version, BASH_COMPAT and patsub_replacement
+        _VIRTUAL_REST=$VIRTUAL_ENV_PROMPT
+        _VIRTUAL_PROMPT=
+        while [ -n "$_VIRTUAL_REST" ]; do
+            _VIRTUAL_CHAR=${_VIRTUAL_REST%"${_VIRTUAL_REST#?}"}
+            _VIRTUAL_REST=${_VIRTUAL_REST#?}
+            case $_VIRTUAL_CHAR in
+                \\) _VIRTUAL_PROMPT="$_VIRTUAL_PROMPT\\\\\\\\" ;;
+                \$ | \`) _VIRTUAL_PROMPT="$_VIRTUAL_PROMPT\\$_VIRTUAL_CHAR" ;;
+                *) _VIRTUAL_PROMPT="$_VIRTUAL_PROMPT$_VIRTUAL_CHAR" ;;
+            esac
+        done
+        unset _VIRTUAL_REST _VIRTUAL_CHAR
+    else
+        # zsh inserts a psvar entry into the prompt as data under every prompt option, so the value needs no
+        # escaping, and the %9v reference holds nothing for another shell to expand when PS1 is exported. The guard
+        # above keeps POSIX shells such as dash away from the array assignment
+        _OLD_VIRTUAL_PSVAR="${psvar[9]-}"
+        psvar[9]="$VIRTUAL_ENV_PROMPT"
+        # %Nv counts psvar entries from 1 under every option, but KSH_ARRAYS makes the subscript above count from 0
+        if [[ -o ksharrays ]]; then
+            _VIRTUAL_PROMPT='%10v'
+        else
+            _VIRTUAL_PROMPT='%9v'
+        fi
     fi
     PS1="(${_VIRTUAL_PROMPT}) ${PS1-}"
     unset _VIRTUAL_PROMPT
