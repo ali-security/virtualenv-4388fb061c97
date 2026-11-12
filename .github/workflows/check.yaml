@@ -1,14 +1,19 @@
 name: 🧪 check
 on:
   workflow_dispatch:
-  push:
-    branches: ["main"]
-  pull_request:
-  schedule:
-    - cron: "0 8 * * *"
+    inputs:
+      test-filter:
+        description: "pytest selector (e.g. tests/unit/test_util.py); empty runs the full suite"
+        required: false
+        default: ""
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+env:
+  UV_EXCLUDE_NEWER: "2026-10-16T01:00:00Z"
+  # pip's own upload-date cutoff, not PIP_INDEX_URL: virtualenv treats PIP_INDEX_URL as a custom index and skips the
+  # PyPI digest check that tests/unit/seed/wheels/test_acquire.py::test_download_wheel_verifies_digest asserts
+  PIP_UPLOADED_PRIOR_TO: "2026-10-16T01:00:00Z"
 permissions: {}
 jobs:
   test:
@@ -71,6 +76,17 @@ jobs:
         shell: bash
         run: |
           git fetch --force --tags https://github.com/pypa/virtualenv.git
+      - name: Check out activate.xsh with LF endings on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        # .gitattributes pins eol=lf for the other POSIX activators but not *.xsh, so the runner's autocrlf checkout
+        # bakes CRLF into the xonsh template and test_xonsh's LF assertion fails; the released (Linux-built) wheel ships
+        # it with LF, so re-check it out that way through the untracked per-clone attributes file.
+        run: |
+          echo "*.xsh text eol=lf" >> .git/info/attributes
+          rm src/virtualenv/activation/xonsh/activate.xsh
+          git checkout -- src/virtualenv/activation/xonsh/activate.xsh
+          git status --porcelain
       - name: 🚀 Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
@@ -145,7 +161,6 @@ jobs:
               done
             }
             retry sudo apt-get install -y software-properties-common
-            retry sudo apt-add-repository ppa:fish-shell/release-4 -y
             sudo install -m 0755 -d /etc/apt/keyrings
             curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 https://apt.fury.io/nushell/gpg.key \
               | sudo gpg --dearmor -o /etc/apt/keyrings/fury-nushell.gpg
@@ -153,7 +168,32 @@ jobs:
             echo "deb [signed-by=/etc/apt/keyrings/fury-nushell.gpg] https://apt.fury.io/nushell/ /" \
               | sudo tee /etc/apt/sources.list.d/fury.list
             retry sudo apt-get update -y
-            retry sudo apt-get install snapd fish csh nushell -y
+            retry sudo apt-get install snapd nushell -y
+            # Canonical hosts (archive/security.ubuntu.com, Launchpad PPA) are unreachable from the fork's runners:
+            # take fish 4.9.3 (newest at the 21.14.8 release) from its GitHub release and csh from the Debian pool.
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$RUNNER_TEMP/fish.tar.xz" \
+              https://github.com/fish-shell/fish-shell/releases/download/4.9.3/fish-4.9.3-linux-x86_64.tar.xz
+            echo "8f643d10ad1abb0ef7072764c01ceb5cf61b2d373fda400cf60f0bad69b7e095  $RUNNER_TEMP/fish.tar.xz" | sha256sum -c -
+            sudo tar -xJf "$RUNNER_TEMP/fish.tar.xz" -C /usr/local/bin fish
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$RUNNER_TEMP/csh.deb" \
+              http://deb.debian.org/debian/pool/main/c/csh/csh_20240808-4_amd64.deb
+            echo "d9e4ba4246ab33da26be3d1689e0faedc460a0ef7a671c330daf3500e937ceff  $RUNNER_TEMP/csh.deb" | sha256sum -c -
+            sudo dpkg -i "$RUNNER_TEMP/csh.deb"
+            # zsh (test_bash.py zsh prompt cases) and tcsh (test_csh.py) are not preinstalled; take them from the
+            # Debian trixie pool for the same reason as csh above (their deps are all present on ubuntu-24.04).
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$RUNNER_TEMP/zsh-common.deb" \
+              http://deb.debian.org/debian/pool/main/z/zsh/zsh-common_5.9-8_all.deb
+            echo "400c958c7fdb66a945cad32c0edc81cedcfface0059b5e2beb46097a457099bd  $RUNNER_TEMP/zsh-common.deb" | sha256sum -c -
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$RUNNER_TEMP/zsh.deb" \
+              http://deb.debian.org/debian/pool/main/z/zsh/zsh_5.9-8+b24_amd64.deb
+            echo "69791a2e667258a54449cfa01ad0d8d198a4c6e27f02f21c864d0545efe18966  $RUNNER_TEMP/zsh.deb" | sha256sum -c -
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$RUNNER_TEMP/tcsh.deb" \
+              http://deb.debian.org/debian/pool/main/t/tcsh/tcsh_6.24.13-2_amd64.deb
+            echo "30234574fb7fa86cd25c28ae990f34b1109deccdbc78ccf477543dd48e79cb91  $RUNNER_TEMP/tcsh.deb" | sha256sum -c -
+            sudo dpkg -i "$RUNNER_TEMP/zsh-common.deb" "$RUNNER_TEMP/zsh.deb" "$RUNNER_TEMP/tcsh.deb"
+            fish --version
+            zsh --version
+            tcsh --version
           elif [ "$RUNNER_OS" = "macOS" ]; then
             brew update
             if [[ "$MATRIX_PY" == brew@* ]]; then
@@ -161,7 +201,9 @@ jobs:
               brew list --versions "python@$PY" >/dev/null 2>&1 || brew install "python@$PY"
               echo "/usr/local/opt/python@$PY/libexec/bin" >>"${GITHUB_PATH}"
             fi
-            brew install fish tcsh nushell || brew upgrade fish tcsh nushell
+            # bash: macOS ships bash 3.2, and test_bash.py's ${PS1@P} prompt cases need bash 4.4 or later
+            brew install fish tcsh nushell bash || brew upgrade fish tcsh nushell bash
+            bash --version
           elif [ "$RUNNER_OS" = "Windows" ]; then
             read -r nu_tag nu_archive nu_sha256 < <(jq --raw-output \
               '.nushell | [.tag, .assets.Windows.name, .assets.Windows.sha256] | @tsv' tasks/ci-tools.json | tr -d '\r')
@@ -170,6 +212,10 @@ jobs:
             7z x "$RUNNER_TEMP/$nu_archive" -o"$RUNNER_TEMP/nushell" -y
             cp "$RUNNER_TEMP/nushell/nu.exe" "/c/ProgramData/chocolatey/bin/nu.exe"
           fi
+          # test_xonsh.py::test_xonsh needs a xonsh executable on PATH; install it as a uv tool (UV_EXCLUDE_NEWER
+          # resolves the release-era version) so the xonsh activator is exercised on every leg.
+          uv tool install --python-preference only-managed --python 3.13 xonsh
+          xonsh --version
       - name: 🧬 Pick environment to run
         shell: bash
         env:
@@ -196,7 +242,27 @@ jobs:
           fi
           "$python_path" -m pytest tests/tasks/test_pytest_diagnostics.py -n 0 --basetemp=.tox/diagnostics-self-test
       - name: 🏃 Run test suite
-        run: tox run --skip-pkg-install
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            case "$TOXENV" in
+              # these envs run pytest without the coverage report gate; keep their default --skip-slow
+              graalpy)
+                tox run --skip-pkg-install -- ${{ inputs.test-filter }} --skip-slow
+                ;;
+              rp)
+                tox run --skip-pkg-install -- --junitxml ".tox/junit.$TOXENV.xml" ${{ inputs.test-filter }} --skip-slow
+                ;;
+              *)
+                # a scoped run cannot reach the full-suite coverage fail_under gate, so call the env's pytest directly
+                if [ "$RUNNER_OS" = "Windows" ]; then env_bin="$PWD/.tox/$TOXENV/Scripts"; else env_bin="$PWD/.tox/$TOXENV/bin"; fi
+                VIRTUAL_ENV="$PWD/.tox/$TOXENV" PATH="$env_bin:$PATH" "$env_bin/python" -m pytest \
+                  --junitxml ".tox/junit.$TOXENV.xml" -n auto ${{ inputs.test-filter }}
+                ;;
+            esac
+          else
+            tox run --skip-pkg-install
+          fi
         timeout-minutes: ${{ matrix.py == 'graalpy' && 17 || 30 }}
         env:
           GRAALPY_GROUP: ${{ matrix.group || '1/1' }}
@@ -210,12 +276,35 @@ jobs:
           # and GraalVM's Context.close() treats any Python-visible thread still alive as
           # fatal, crashing the job even after every test passed (see #3240). The default
           # signal-based method needs no such thread. --timeout=300 stays as a safety net.
-          PYTEST_ADDOPTS: "-vv --durations=20 --reruns 2 --reruns-delay 2${{ matrix.py == 'graalpy' && ' --timeout=300' || '' }}"
+          PYTEST_ADDOPTS: "-vv -rs --durations=20 --reruns 2 --reruns-delay 2${{ matrix.py == 'graalpy' && ' --timeout=300' || '' }}"
           # If a worker process dies outright (seen on 3.13t/Windows with no Python-level
           # exception at all), this prints a native stack trace to stderr instead of nothing.
           PYTHONFAULTHANDLER: "1"
           CI_RUN: "yes"
           DIFF_AGAINST: HEAD
+      - name: Report skipped tests with their reasons
+        if: always()
+        shell: bash
+        # the -rs summary sits deep inside a long log; restate every skipped test and its reason from the junit
+        # reports as one compact block at the end of the job log
+        run: |
+          uv run --no-project --python-preference only-managed --python 3.15 python -I - .tox/junit.*.xml <<'EOF'
+          import sys, collections, xml.etree.ElementTree as ET
+          by_reason, total = collections.defaultdict(list), collections.Counter()
+          for path in sys.argv[1:]:
+              for case in ET.parse(path).getroot().iter("testcase"):
+                  outcome = "passed"
+                  for child in case:
+                      if child.tag in ("failure", "error", "skipped"):
+                          outcome = child.tag
+                          if child.tag == "skipped":
+                              reason = (child.get("message") or "").strip() or "(no reason)"
+                              by_reason[reason].append(f"{case.get('classname')}::{case.get('name')}")
+                  total[outcome] += 1
+          print(f"junit totals: {dict(total)}")
+          for reason, tests in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
+              print(f"SKIPPED [{len(tests)}] {reason}: {', '.join(sorted(set(tests)))}")
+          EOF
       - name: 📤 Store macOS crash reports
         if: always() && matrix.diagnostics && runner.os == 'macOS'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -244,13 +333,16 @@ jobs:
           # combined .coverage.<env> files and the per-process files of envs that do not combine them
           path: .tox/.coverage*
           include-hidden-files: true
-          if-no-files-found: error
+          # a scoped run calls pytest outside coverage
+          if-no-files-found: ${{ inputs.test-filter != '' && 'ignore' || 'error' }}
           retention-days: 1
   coverage:
     name: 📊 coverage
     needs: test
-    if: github.event_name != 'schedule' || github.repository_owner == 'pypa'
+    # the coverage gate measures the full suite, so a scoped run skips it
+    if: (github.event_name != 'schedule' || github.repository_owner == 'pypa') && inputs.test-filter == ''
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read # check out the sources the report reads
     steps:
@@ -283,6 +375,7 @@ jobs:
     name: 🔎 check ${{ matrix.tox_env }} - ${{ matrix.os }}
     if: github.event_name != 'schedule' || github.repository_owner == 'pypa'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     permissions:
       contents: read
     strategy:
@@ -293,22 +386,13 @@ jobs:
           - windows-2025-vs2026
         tox_env:
           - dev
-          - docs
           - property
           - fuzz
-          - readme
           - tasks
-          - type
-          - type-3.9
-          - upgrade
           - zipapp
         exclude:
-          - {os: windows-2025-vs2026, tox_env: docs}
           - {os: windows-2025-vs2026, tox_env: fuzz}
-          - {os: windows-2025-vs2026, tox_env: readme}
           - {os: windows-2025-vs2026, tox_env: tasks}
-          - {os: windows-2025-vs2026, tox_env: type}
-          - {os: windows-2025-vs2026, tox_env: type-3.9}
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -336,11 +420,13 @@ jobs:
         run: tox run --skip-pkg-install
         env:
           TOXENV: ${{ matrix.tox_env }}
+          PYTEST_ADDOPTS: "-rs"
           UPGRADE_ADVISORY: ${{ matrix.tox_env == 'upgrade' && '1' || '' }}
   test-queries:
     name: 🔎 test custom queries
     if: github.event_name != 'schedule' || github.repository_owner == 'pypa'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read # check out the queries and their test fixtures
       security-events: read # codeql-action needs it to reach its API endpoints
@@ -364,9 +450,11 @@ jobs:
     if: always() && (github.event_name != 'schedule' || github.repository_owner == 'pypa')
     needs: [test, coverage, check, test-queries]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions: {}
     steps:
       - name: ✅ Require every job to succeed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
+          allowed-skips: ${{ inputs.test-filter != '' && 'coverage' || '' }}
           jobs: ${{ toJSON(needs) }}

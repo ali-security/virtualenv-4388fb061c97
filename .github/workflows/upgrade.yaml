@@ -1,8 +1,5 @@
 name: Upgrade embedded dependencies
 on:
-  schedule:
-    - cron: "0 10 * * *" # daily at 10:00 UTC
-    - cron: "0 11 * * 1" # Mondays at 11:00 UTC, after the daily run, to also bump the CI test tools
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

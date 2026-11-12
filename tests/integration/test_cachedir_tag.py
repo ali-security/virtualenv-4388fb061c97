@@ -20,8 +20,8 @@ def compatible_is_tar_present() -> bool:
     return TAR and "--exclude-caches" in check_output(args=[TAR, "--help"], text=True, encoding="utf-8")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not have tar")
 @pytest.mark.skipif(not compatible_is_tar_present(), reason="Compatible tar is not installed")
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not have tar")
 def test_cachedir_tag_ignored_by_tag(tmp_path: Path) -> None:
     venv = tmp_path / ".venv"
     cli_run(["--activators", "", "--without-pip", str(venv)])

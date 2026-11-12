@@ -320,7 +320,8 @@ def test_prompt_renders_name_literally(
     assert rendered.startswith(f"({prompt}) ")
 
 
-@pytest.mark.skipif(IS_WIN or shutil.which("dash") is None, reason="needs dash as a POSIX shell")
+@pytest.mark.skipif(shutil.which("dash") is None, reason="needs dash as a POSIX shell")
+@pytest.mark.skipif(IS_WIN, reason="dash is a POSIX shell with no Windows build")
 def test_bash_activate_sources_under_dash(tmp_path: Path, current_fastest: str) -> None:
     dest = tmp_path / "env"
     cli_run([

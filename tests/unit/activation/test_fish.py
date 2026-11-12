@@ -66,8 +66,8 @@ def test_fish_tkinter_generation(
         assert "if test -n ''\n  set -gx _OLD_VIRTUAL_TK_LIBRARY" in content
 
 
-@pytest.mark.skipif(IS_WIN, reason="fish is not available on Windows")
 @pytest.mark.skipif(FISH is None, reason="fish is not installed")
+@pytest.mark.skipif(IS_WIN, reason="fish is not available on Windows")
 def test_fish_tkinter_path_does_not_run_commands(
     rendered_activate_fish: Callable[[str | None, str | None], Path], tmp_path: Path
 ) -> None:
@@ -79,8 +79,8 @@ def test_fish_tkinter_path_does_not_run_commands(
     assert not marker.exists()
 
 
-@pytest.mark.skipif(IS_WIN, reason="fish is not available on Windows")
 @pytest.mark.skipif(FISH is None, reason="fish is not installed")
+@pytest.mark.skipif(IS_WIN, reason="fish is not available on Windows")
 @pytest.mark.parametrize(
     ("prompt", "env_name"),
     [
@@ -113,8 +113,8 @@ def test_fish_activate_does_not_run_commands(
     assert result.stdout == str(dest), result.stderr
 
 
-@pytest.mark.skipif(IS_WIN, reason="fish is not available on Windows")
 @pytest.mark.skipif(FISH is None, reason="fish is not installed")
+@pytest.mark.skipif(IS_WIN, reason="fish is not available on Windows")
 @pytest.mark.parametrize(
     ("original", "expected"),
     [
@@ -152,8 +152,8 @@ def test_fish_deactivate_restores_path(tmp_path, current_fastest, original, expe
     assert out == f"PATH=<{expected}>\n"
 
 
-@pytest.mark.skipif(IS_WIN, reason="fish is not available on Windows")
 @pytest.mark.skipif(FISH is None, reason="fish is not installed")
+@pytest.mark.skipif(IS_WIN, reason="fish is not available on Windows")
 def test_fish_prompt_survives_shadowed_source(activation_python, tmp_path) -> None:
     # A user function shadowing `.`/`source` must not hijack the prompt's exit-status restore. Source a copy of the
     # rendered script from an ASCII path so the driver avoids the venv path's special characters.
@@ -175,7 +175,7 @@ def test_fish_prompt_survives_shadowed_source(activation_python, tmp_path) -> No
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(IS_WIN, reason="we have not setup fish in CI yet")
+@pytest.mark.skipif(IS_WIN, reason="fish is not available on Windows")
 def test_fish(activation_tester_class, activation_tester, monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     fish_conf_dir = tmp_path / ".config" / "fish"

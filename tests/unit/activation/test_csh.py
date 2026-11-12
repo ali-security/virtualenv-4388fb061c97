@@ -142,8 +142,8 @@ def test_cshell_escapes_prompt_expansion(
     assert f"set prompt = '(''{plain_escaped}'') '" in content
 
 
-@pytest.mark.skipif(IS_WIN, reason="csh is not supported on Windows")
 @pytest.mark.skipif(TCSH is None, reason="tcsh is not installed")
+@pytest.mark.skipif(IS_WIN, reason="csh is not supported on Windows")
 @pytest.mark.parametrize(
     "name",
     [
@@ -174,8 +174,8 @@ def test_cshell_activates_path_with_special_characters(
     assert result.stdout == str(dest), result.stderr
 
 
-@pytest.mark.skipif(IS_WIN, reason="csh is not supported on Windows")
 @pytest.mark.skipif(TCSH is None, reason="tcsh is not installed")
+@pytest.mark.skipif(IS_WIN, reason="csh is not supported on Windows")
 @pytest.mark.parametrize("original", [pytest.param("", id="empty"), pytest.param("/usr/bin:/bin", id="populated")])
 def test_cshell_deactivate_restores_path(csh_plain_activate: Path, original: str) -> None:
     driver = f'setenv PATH "{original}"\nsource {csh_plain_activate}\ndeactivate\necho "PATH=<$PATH>"\n'
@@ -185,8 +185,8 @@ def test_cshell_deactivate_restores_path(csh_plain_activate: Path, original: str
     assert result.stdout == f"PATH=<{original}>\n", result.stderr
 
 
-@pytest.mark.skipif(IS_WIN, reason="csh is not supported on Windows")
 @pytest.mark.skipif(TCSH is None, reason="tcsh is not installed")
+@pytest.mark.skipif(IS_WIN, reason="csh is not supported on Windows")
 def test_cshell_deactivate_removes_aliases(csh_plain_activate: Path) -> None:
     driver = f'source {csh_plain_activate}\ndeactivate\nalias deactivate\nalias pydoc\necho "done"\n'
 
@@ -195,8 +195,8 @@ def test_cshell_deactivate_removes_aliases(csh_plain_activate: Path) -> None:
     assert result.stdout == "done\n", result.stderr
 
 
-@pytest.mark.skipif(IS_WIN, reason="csh is not supported on Windows")
 @pytest.mark.skipif(TCSH is None, reason="tcsh is not installed")
+@pytest.mark.skipif(IS_WIN, reason="csh is not supported on Windows")
 def test_cshell_reactivation_restores_original_path(csh_plain_activate: Path) -> None:
     driver = (
         f'setenv PATH "/original/path"\nsource {csh_plain_activate}\nsource {csh_plain_activate}\ndeactivate\n'
