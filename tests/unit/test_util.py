@@ -17,7 +17,7 @@ from virtualenv.app_data import _cache_dir_with_migration, _default_app_data_dir
 from virtualenv.info import fs_supports_symlink
 from virtualenv.util import zipapp
 from virtualenv.util.lock import ReentrantFileLock
-from virtualenv.util.path import copy, safe_delete, symlink
+from virtualenv.util.path import copy, safe_delete, symlink, write_file
 from virtualenv.util.subprocess import run_cmd
 
 if os.name == "nt":
@@ -142,6 +142,39 @@ def test_safe_delete_does_not_chmod_link_target(tmp_path: Path, mocker: MockerFi
     finally:
         mocker.stop(unlink)
     assert source.stat().st_mode == mode
+
+
+@pytest.mark.parametrize("existing", [pytest.param(False, id="new"), pytest.param(True, id="replace")])
+def test_write_file_replaces_content(tmp_path: Path, existing: bool) -> None:
+    path: Final = tmp_path / "generated"
+    if existing:
+        path.write_bytes(b"previous")
+    write_file(path, b"generated")
+    assert path.read_bytes() == b"generated"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        pytest.param("hardlink", id="hardlink"),
+        pytest.param("symlink", id="symlink"),
+        pytest.param("dangling", id="dangling"),
+    ],
+)
+def test_write_file_does_not_write_through_links(tmp_path: Path, kind: str) -> None:
+    target: Final = tmp_path / "outside"
+    path: Final = tmp_path / "generated"
+    if kind != "dangling":
+        target.write_bytes(b"original")
+    if kind == "hardlink":
+        os.link(target, path)
+    else:
+        if not fs_supports_symlink():
+            pytest.skip("requires symlinks")
+        path.symlink_to(target)
+    write_file(path, b"generated")
+    assert (path.is_symlink(), path.lstat().st_nlink, path.read_bytes()) == (False, 1, b"generated")
+    assert (target.read_bytes() if target.exists() else None) == (None if kind == "dangling" else b"original")
 
 
 def test_run_fail(tmp_path) -> None:
